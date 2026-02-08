@@ -1,0 +1,1026 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EDIC Quiz Generator</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- PDF.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800;900&display=swap');
+        
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: 'DM Sans', system-ui, sans-serif;
+            min-height: 100vh;
+            background: radial-gradient(ellipse at 20% 0%, #0f2847 0%, #0a1628 60%, #060d18 100%);
+            color: #f1f5f9;
+        }
+        
+        @keyframes fadeUp {
+            from { opacity: 0; transform: translateY(24px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        @keyframes float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .animate-fadeUp {
+            animation: fadeUp 0.6s ease;
+        }
+        
+        .animate-float {
+            animation: float 3s ease-in-out infinite;
+        }
+        
+        .spinner {
+            width: 48px;
+            height: 48px;
+            border: 4px solid rgba(255,255,255,0.08);
+            border-top-color: #22d3ee;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useRef, useCallback, useEffect } = React;
+
+        // ─── Constants ───────────────────────────────────────────────────────
+        const TOTAL_QUESTIONS = 30;
+        const PASS_THRESHOLD = 21;
+
+        const DIFFICULTY_CONFIGS = {
+            mixed: { label: "Mixed Difficulty", emoji: "🎯", desc: "Exam-Realistic Distribution", easy: 6, moderate: 15, hard: 9 },
+            easy: { label: "All Easy", emoji: "🌱", desc: "Foundational review", easy: 30, moderate: 0, hard: 0 },
+            moderate: { label: "All Moderate", emoji: "⚡", desc: "Standard practice", easy: 0, moderate: 30, hard: 0 },
+            hard: { label: "All Hard", emoji: "🔥", desc: "Advanced preparation", easy: 0, moderate: 0, hard: 30 },
+        };
+
+        const diffBadgeColor = {
+            Easy: { bg: "#d1fae5", text: "#065f46", dot: "#10b981" },
+            Moderate: { bg: "#fef3c7", text: "#92400e", dot: "#f59e0b" },
+            Hard: { bg: "#fee2e2", text: "#991b1b", dot: "#ef4444" },
+        };
+
+        const T = {
+            navy: "#0a1628",
+            deepBlue: "#0f2847",
+            teal: "#0ea5e9",
+            cyan: "#22d3ee",
+            mint: "#34d399",
+            gold: "#fbbf24",
+            surface: "rgba(15,40,71,0.6)",
+            glass: "rgba(255,255,255,0.04)",
+            border: "rgba(255,255,255,0.08)",
+            txt: "#f1f5f9",
+            txt2: "#94a3b8",
+            muted: "#64748b",
+        };
+
+        function shuffleArray(arr) {
+            const a = [...arr];
+            for (let i = a.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [a[i], a[j]] = [a[j], a[i]];
+            }
+            return a;
+        }
+
+        // ─── PDF.js Setup ───────────────────────────────────────────────────
+        let pdfjsLoaded = false;
+
+        async function initPdfJs() {
+            if (pdfjsLoaded) return;
+            pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+            pdfjsLoaded = true;
+        }
+
+        async function extractTextFromPdf(arrayBuffer) {
+            await initPdfJs();
+            const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+            let fullText = "";
+            for (let i = 1; i <= pdf.numPages; i++) {
+                const page = await pdf.getPage(i);
+                const content = await page.getTextContent();
+                const pageText = content.items.map((item) => item.str).join(" ");
+                fullText += pageText + "\n\n";
+            }
+            return fullText.trim();
+        }
+
+        // ─── Prompt Builder ──────────────────────────────────────────────────
+        function buildPrompt(combinedText, difficulty, batchNum, totalBatches, fileNames) {
+            const diffInstruction = difficulty === "mixed"
+                ? "Generate a mix: 2 Easy, 5 Moderate, 3 Hard questions."
+                : `Generate all 10 questions at ${difficulty.charAt(0).toUpperCase() + difficulty.slice(1)} difficulty.`;
+
+            return `You are an expert medical educator specializing in the EDIC (European Diploma in Intensive Care Medicine) examination.
+
+Generate exactly 10 unique, high-quality single-best-answer MCQs (batch ${batchNum}/${totalBatches}) based on the study material below.
+
+The material comes from these source files: ${fileNames.join(", ")}
+
+${diffInstruction}
+
+CRITICAL RULES:
+- Each question MUST have a clinical vignette/scenario (3-5 sentences with realistic patient data: age, sex, vitals, labs)
+- Each question MUST have exactly 4 options (A, B, C, D) — all plausible, no obvious distractors
+- Each question MUST have exactly 1 correct answer
+- Provide a detailed explanation (4-6 sentences): why the correct answer is right AND why each distractor is wrong
+- Include a plausible academic reference (guideline, textbook, or journal)
+- Vary topics broadly across ALL the content provided — do NOT cluster questions from one section
+- Questions must test clinical reasoning and application, not simple recall
+- Each batch must cover DIFFERENT topics — batch ${batchNum} should avoid topics from earlier batches
+
+Respond ONLY with a valid JSON array. No markdown fences, no backticks, no preamble:
+[
+  {
+    "difficulty": "Easy|Moderate|Hard",
+    "topic": "string",
+    "vignette": "string",
+    "questionText": "string",
+    "options": [
+      {"letter": "A", "text": "string"},
+      {"letter": "B", "text": "string"},
+      {"letter": "C", "text": "string"},
+      {"letter": "D", "text": "string"}
+    ],
+    "correctAnswer": "A|B|C|D",
+    "explanation": "string",
+    "reference": "string"
+  }
+]
+
+STUDY MATERIAL:
+${combinedText.slice(0, 28000)}`;
+        }
+
+        // ─── UI Components ───────────────────────────────────────────────────
+        function Card({ children, style, onClick }) {
+            return (
+                <div
+                    onClick={onClick}
+                    style={{
+                        background: T.surface,
+                        backdropFilter: "blur(20px)",
+                        border: `1px solid ${T.border}`,
+                        borderRadius: 16,
+                        ...style,
+                    }}
+                >
+                    {children}
+                </div>
+            );
+        }
+
+        function Badge({ difficulty }) {
+            const c = diffBadgeColor[difficulty] || diffBadgeColor.Moderate;
+            return (
+                <span style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "5px 14px",
+                    borderRadius: 8,
+                    fontSize: 13,
+                    fontWeight: 700,
+                    background: c.bg,
+                    color: c.text,
+                }}>
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: c.dot }} />
+                    {difficulty}
+                </span>
+            );
+        }
+
+        function Bar({ value, max }) {
+            const pct = max > 0 ? Math.round((value / max) * 100) : 0;
+            return (
+                <div style={{ width: "100%", height: 6, background: "rgba(255,255,255,0.08)", borderRadius: 99, overflow: "hidden" }}>
+                    <div style={{
+                        height: "100%",
+                        width: `${pct}%`,
+                        background: `linear-gradient(90deg, ${T.teal}, ${T.cyan})`,
+                        borderRadius: 99,
+                        transition: "width 0.5s cubic-bezier(.4,0,.2,1)"
+                    }} />
+                </div>
+            );
+        }
+
+        function Btn({ children, onClick, disabled, variant = "primary", style: sx }) {
+            const isPrimary = variant === "primary";
+            return (
+                <button
+                    onClick={onClick}
+                    disabled={disabled}
+                    style={{
+                        padding: "14px 24px",
+                        borderRadius: 12,
+                        border: isPrimary ? "none" : `2px solid ${T.border}`,
+                        fontWeight: 700,
+                        fontSize: 15,
+                        cursor: disabled ? "not-allowed" : "pointer",
+                        background: isPrimary
+                            ? disabled ? "rgba(255,255,255,0.06)" : `linear-gradient(135deg, ${T.teal}, ${T.cyan})`
+                            : "transparent",
+                        color: isPrimary ? (disabled ? T.muted : "#fff") : T.txt2,
+                        transition: "all 0.3s",
+                        fontFamily: "inherit",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 8,
+                        ...sx,
+                    }}
+                >
+                    {children}
+                </button>
+            );
+        }
+
+        // ─── Upload Screen ───────────────────────────────────────────────────
+        function UploadScreen({ onFilesReady }) {
+            const fileRef = useRef(null);
+            const [dragging, setDragging] = useState(false);
+            const [files, setFiles] = useState([]);
+            const [processing, setProcessing] = useState(false);
+
+            const addFiles = useCallback(async (fileList) => {
+                const pdfs = Array.from(fileList).filter((f) => f.type === "application/pdf");
+                if (pdfs.length === 0) return;
+
+                setProcessing(true);
+                const results = [];
+
+                for (const file of pdfs) {
+                    if (files.some((f) => f.name === file.name)) continue;
+                    try {
+                        const buf = await file.arrayBuffer();
+                        const text = await extractTextFromPdf(buf);
+                        if (text.length < 50) {
+                            results.push({ name: file.name, text: "", status: "error", error: "No readable text (scanned/image PDF?)" });
+                        } else {
+                            results.push({ name: file.name, text, status: "ready", error: null });
+                        }
+                    } catch (e) {
+                        results.push({ name: file.name, text: "", status: "error", error: e.message || "Extraction failed" });
+                    }
+                }
+
+                setFiles((prev) => [...prev, ...results]);
+                setProcessing(false);
+            }, [files]);
+
+            const removeFile = (name) => setFiles((prev) => prev.filter((f) => f.name !== name));
+            const readyFiles = files.filter((f) => f.status === "ready");
+
+            return (
+                <div className="animate-fadeUp">
+                    <Card style={{ padding: 40 }}>
+                        <div
+                            onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+                            onDragLeave={() => setDragging(false)}
+                            onDrop={(e) => { e.preventDefault(); setDragging(false); addFiles(e.dataTransfer.files); }}
+                            onClick={() => fileRef.current?.click()}
+                            style={{
+                                border: `2px dashed ${dragging ? T.cyan : "rgba(255,255,255,0.15)"}`,
+                                borderRadius: 16,
+                                padding: "40px 24px",
+                                cursor: "pointer",
+                                transition: "all 0.3s",
+                                background: dragging ? "rgba(34,211,238,0.06)" : "transparent",
+                                textAlign: "center",
+                            }}
+                        >
+                            <div className="animate-float" style={{ fontSize: 48, marginBottom: 12 }}>📄</div>
+                            <h2 style={{ color: T.txt, fontSize: 20, fontWeight: 700, marginBottom: 6 }}>Upload Study Materials</h2>
+                            <p style={{ color: T.txt2, fontSize: 15 }}>Drag & drop PDF files or click to browse</p>
+                            <p style={{ color: T.muted, fontSize: 13, marginTop: 6 }}>Multiple PDFs supported • Max 50MB each</p>
+                            <input
+                                ref={fileRef}
+                                type="file"
+                                accept=".pdf"
+                                multiple
+                                style={{ display: "none" }}
+                                onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
+                            />
+                        </div>
+
+                        {processing && (
+                            <div style={{ marginTop: 24, textAlign: "center" }}>
+                                <div className="spinner" style={{ width: 36, height: 36 }} />
+                                <p style={{ color: T.txt2, marginTop: 12, fontSize: 14 }}>Extracting text from PDFs…</p>
+                            </div>
+                        )}
+
+                        {files.length > 0 && (
+                            <div style={{ marginTop: 24 }}>
+                                <h4 style={{ color: T.txt, fontWeight: 700, fontSize: 15, marginBottom: 12 }}>
+                                    Uploaded Files ({readyFiles.length} ready)
+                                </h4>
+                                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                                    {files.map((f) => (
+                                        <div
+                                            key={f.name}
+                                            style={{
+                                                display: "flex",
+                                                alignItems: "center",
+                                                gap: 12,
+                                                padding: "12px 16px",
+                                                borderRadius: 10,
+                                                background: f.status === "ready" ? "rgba(52,211,153,0.08)" : "rgba(248,113,113,0.08)",
+                                                border: `1px solid ${f.status === "ready" ? "#34d39933" : "#f8717133"}`,
+                                            }}
+                                        >
+                                            <span style={{ fontSize: 20 }}>{f.status === "ready" ? "✅" : "❌"}</span>
+                                            <div style={{ flex: 1, minWidth: 0 }}>
+                                                <div style={{ color: T.txt, fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                                    {f.name}
+                                                </div>
+                                                {f.status === "ready" ? (
+                                                    <div style={{ color: T.muted, fontSize: 12 }}>{(f.text.length / 1000).toFixed(1)}k characters extracted</div>
+                                                ) : (
+                                                    <div style={{ color: "#f87171", fontSize: 12 }}>{f.error}</div>
+                                                )}
+                                            </div>
+                                            <button
+                                                onClick={(e) => { e.stopPropagation(); removeFile(f.name); }}
+                                                style={{ background: "none", border: "none", color: T.muted, cursor: "pointer", fontSize: 18, padding: 4 }}
+                                            >
+                                                ✕
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {readyFiles.length > 0 && (
+                            <div style={{ marginTop: 24, textAlign: "center" }}>
+                                <Btn onClick={() => onFilesReady(readyFiles)} style={{ padding: "16px 48px", fontSize: 16 }}>
+                                    Continue with {readyFiles.length} file{readyFiles.length > 1 ? "s" : ""} →
+                                </Btn>
+                            </div>
+                        )}
+                    </Card>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14, marginTop: 20 }}>
+                        {[
+                            { icon: "✦", title: "30 Unique MCQs", sub: "Zero repetition" },
+                            { icon: "🧠", title: "EDIC Standard", sub: "Exam-authentic" },
+                            { icon: "📚", title: "Multi-File", sub: "Combine sources" },
+                            { icon: "💾", title: "Export Failed", sub: "Save for review" },
+                        ].map((f, i) => (
+                            <Card key={i} style={{ padding: "20px 16px", textAlign: "center" }}>
+                                <div style={{ fontSize: 24, marginBottom: 6 }}>{f.icon}</div>
+                                <div style={{ color: T.txt, fontWeight: 700, fontSize: 14 }}>{f.title}</div>
+                                <div style={{ color: T.muted, fontSize: 12, marginTop: 2 }}>{f.sub}</div>
+                            </Card>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
+        // ─── API Key Input Screen ────────────────────────────────────────────
+        function ApiKeyScreen({ onKeySet }) {
+            const [key, setKey] = useState("");
+            const [saved, setSaved] = useState(false);
+
+            const handleSave = () => {
+                if (key.trim().length > 20) {
+                    localStorage.setItem("claude_api_key", key.trim());
+                    setSaved(true);
+                    setTimeout(() => onKeySet(key.trim()), 500);
+                }
+            };
+
+            return (
+                <div className="animate-fadeUp">
+                    <Card style={{ padding: 40, textAlign: "center" }}>
+                        <div style={{ fontSize: 48, marginBottom: 16 }}>🔑</div>
+                        <h2 style={{ color: T.txt, fontSize: 22, fontWeight: 700, marginBottom: 12 }}>
+                            Claude API Key Required
+                        </h2>
+                        <p style={{ color: T.txt2, fontSize: 14, marginBottom: 24, lineHeight: 1.6 }}>
+                            This app uses Claude AI to generate questions from your PDFs.<br />
+                            Your key is stored locally in your browser only.
+                        </p>
+                        
+                        <input
+                            type="password"
+                            value={key}
+                            onChange={(e) => setKey(e.target.value)}
+                            placeholder="sk-ant-api03-..."
+                            style={{
+                                width: "100%",
+                                padding: "14px 18px",
+                                borderRadius: 12,
+                                border: `1px solid ${T.border}`,
+                                background: T.glass,
+                                color: T.txt,
+                                fontSize: 15,
+                                fontFamily: "inherit",
+                                marginBottom: 16,
+                            }}
+                        />
+                        
+                        <Btn onClick={handleSave} disabled={key.trim().length < 20} style={{ width: "100%" }}>
+                            {saved ? "✓ Saved!" : "Save API Key & Continue"}
+                        </Btn>
+                        
+                        <p style={{ color: T.muted, fontSize: 12, marginTop: 16 }}>
+                            <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer" style={{ color: T.cyan }}>
+                                Get a key from Anthropic Console →
+                            </a>
+                        </p>
+                    </Card>
+                </div>
+            );
+        }
+
+        // ─── Difficulty Screen ───────────────────────────────────────────────
+        function DifficultyScreen({ files, onSelect }) {
+            return (
+                <div className="animate-fadeUp">
+                    <Card style={{ padding: 28, textAlign: "center", marginBottom: 24 }}>
+                        <div style={{ fontSize: 44, color: T.mint, marginBottom: 8 }}>✓</div>
+                        <h2 style={{ color: T.txt, fontSize: 20, fontWeight: 700 }}>Material Analyzed</h2>
+                        <div style={{ margin: "12px 0", display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 8 }}>
+                            {files.map((f) => (
+                                <span key={f.name} style={{
+                                    display: "inline-block",
+                                    background: "rgba(14,165,233,0.1)",
+                                    border: `1px solid ${T.teal}33`,
+                                    borderRadius: 8,
+                                    padding: "4px 12px",
+                                    fontSize: 13,
+                                    color: T.cyan,
+                                    fontWeight: 600,
+                                }}>
+                                    📄 {f.name}
+                                </span>
+                            ))}
+                        </div>
+                        <p style={{ color: T.muted, fontSize: 14 }}>
+                            {(files.reduce((s, f) => s + f.text.length, 0) / 1000).toFixed(1)}k total characters • {TOTAL_QUESTIONS} questions
+                        </p>
+                    </Card>
+
+                    <h3 style={{ color: T.txt, textAlign: "center", fontSize: 18, fontWeight: 700, marginBottom: 18 }}>Select Difficulty</h3>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
+                        {Object.entries(DIFFICULTY_CONFIGS).map(([key, cfg]) => (
+                            <Card
+                                key={key}
+                                onClick={() => onSelect(key)}
+                                style={{
+                                    padding: 24,
+                                    cursor: "pointer",
+                                    transition: "all 0.3s",
+                                    position: "relative",
+                                    border: key === "mixed" ? `1px solid ${T.cyan}` : `1px solid ${T.border}`,
+                                }}
+                            >
+                                {key === "mixed" && (
+                                    <span style={{
+                                        position: "absolute",
+                                        top: -10,
+                                        right: 14,
+                                        background: `linear-gradient(135deg, ${T.gold}, #f59e0b)`,
+                                        color: "#1a1a2e",
+                                        padding: "3px 12px",
+                                        borderRadius: 99,
+                                        fontSize: 11,
+                                        fontWeight: 800,
+                                    }}>
+                                        ★ RECOMMENDED
+                                    </span>
+                                )}
+                                <div style={{ fontSize: 32, textAlign: "center", marginBottom: 10 }}>{cfg.emoji}</div>
+                                <h4 style={{ color: T.txt, fontSize: 16, fontWeight: 700, textAlign: "center" }}>{cfg.label}</h4>
+                                <p style={{ color: T.muted, fontSize: 13, textAlign: "center", marginTop: 4 }}>{cfg.desc}</p>
+                                {key === "mixed" && (
+                                    <div style={{ marginTop: 14 }}>
+                                        {[
+                                            { l: "6 Easy (20%)", c: "#10b981" },
+                                            { l: "15 Moderate (50%)", c: "#f59e0b" },
+                                            { l: "9 Hard (30%)", c: "#ef4444" },
+                                        ].map((x, i) => (
+                                            <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+                                                <span style={{ width: 8, height: 8, borderRadius: "50%", background: x.c }} />
+                                                <span style={{ color: T.txt2, fontSize: 12 }}>{x.l}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                                <div style={{
+                                    marginTop: 16,
+                                    textAlign: "center",
+                                    padding: "9px 0",
+                                    borderRadius: 10,
+                                    fontWeight: 700,
+                                    fontSize: 13,
+                                    background: key === "mixed" ? `linear-gradient(135deg, ${T.teal}, ${T.cyan})` : "rgba(255,255,255,0.06)",
+                                    color: key === "mixed" ? "#fff" : T.txt2,
+                                    border: key !== "mixed" ? `1px solid ${T.border}` : "none",
+                                }}>
+                                    Select
+                                </div>
+                            </Card>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
+        // ─── Loading Screen ──────────────────────────────────────────────────
+        function LoadingScreen({ progress, status }) {
+            return (
+                <div style={{ textAlign: "center", padding: "56px 24px" }} className="animate-fadeUp">
+                    <div className="spinner" />
+                    <h3 style={{ color: T.txt, fontSize: 20, fontWeight: 700, marginTop: 20 }}>Generating Your Quiz…</h3>
+                    <p style={{ color: T.txt2, marginTop: 8, fontSize: 14 }}>{status}</p>
+                    <div style={{ maxWidth: 360, margin: "20px auto 0" }}>
+                        <Bar value={progress} max={TOTAL_QUESTIONS} />
+                        <p style={{ color: T.muted, fontSize: 13, marginTop: 6 }}>{progress}/{TOTAL_QUESTIONS} generated</p>
+                    </div>
+                </div>
+            );
+        }
+
+        // ─── Quiz Screen ─────────────────────────────────────────────────────
+        function QuizScreen({ questions, onComplete }) {
+            const [idx, setIdx] = useState(0);
+            const [sel, setSel] = useState(null);
+            const [submitted, setSubmitted] = useState(false);
+            const scoreRef = useRef(0);
+            const [displayScore, setDisplayScore] = useState(0);
+            const answersRef = useRef([]);
+
+            const q = questions[idx];
+            const isCorrect = submitted && sel === q.correctAnswer;
+
+            function submit() {
+                if (!sel || submitted) return;
+                const correct = sel === q.correctAnswer;
+                if (correct) {
+                    scoreRef.current += 1;
+                    setDisplayScore(scoreRef.current);
+                }
+                setSubmitted(true);
+                answersRef.current.push({ ...q, userAnswer: sel, correct });
+            }
+
+            function next() {
+                if (idx + 1 >= questions.length) {
+                    onComplete(scoreRef.current, [...answersRef.current]);
+                    return;
+                }
+                setIdx(idx + 1);
+                setSel(null);
+                setSubmitted(false);
+            }
+
+            return (
+                <div className="animate-fadeUp">
+                    <Card style={{ padding: "14px 20px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span style={{ color: T.txt, fontWeight: 700, fontSize: 14 }}>Question {idx + 1}/{questions.length}</span>
+                        <span style={{ color: T.cyan, fontWeight: 700, fontSize: 14 }}>Score: {displayScore}/{questions.length}</span>
+                    </Card>
+                    <Bar value={idx + 1} max={questions.length} />
+
+                    <Card style={{ padding: 28, marginTop: 16 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
+                            <Badge difficulty={q.difficulty} />
+                            <span style={{ color: T.muted, fontSize: 12, fontWeight: 600 }}>{q.topic}</span>
+                        </div>
+
+                        <div style={{
+                            background: "rgba(14,165,233,0.06)",
+                            borderLeft: `3px solid ${T.teal}`,
+                            borderRadius: "0 10px 10px 0",
+                            padding: "16px 18px",
+                            margin: "12px 0",
+                            color: T.txt2,
+                            fontSize: 14,
+                            lineHeight: 1.75,
+                        }}>
+                            {q.vignette}
+                        </div>
+
+                        <h3 style={{ color: T.txt, fontSize: 17, fontWeight: 700, margin: "18px 0 14px", lineHeight: 1.5 }}>{q.questionText}</h3>
+
+                        <div style={{ display: "flex", flexDirection: "column", gap: 10, margin: "16px 0" }}>
+                            {q.options.map((opt) => {
+                                let bg = T.glass;
+                                let bc = T.border;
+                                if (submitted) {
+                                    if (opt.letter === q.correctAnswer) { bg = "rgba(52,211,153,0.12)"; bc = "#34d399"; }
+                                    else if (opt.letter === sel) { bg = "rgba(248,113,113,0.12)"; bc = "#f87171"; }
+                                } else if (sel === opt.letter) { bg = "rgba(14,165,233,0.1)"; bc = T.teal; }
+
+                                return (
+                                    <button
+                                        key={opt.letter}
+                                        onClick={() => !submitted && setSel(opt.letter)}
+                                        style={{
+                                            display: "flex",
+                                            alignItems: "flex-start",
+                                            gap: 12,
+                                            padding: "14px 16px",
+                                            border: `2px solid ${bc}`,
+                                            borderRadius: 12,
+                                            background: bg,
+                                            cursor: submitted ? "default" : "pointer",
+                                            textAlign: "left",
+                                            transition: "all 0.25s",
+                                            color: T.txt,
+                                            fontSize: 14,
+                                            lineHeight: 1.55,
+                                            fontFamily: "inherit",
+                                        }}
+                                    >
+                                        <span style={{ fontWeight: 800, fontSize: 15, color: T.cyan, minWidth: 22 }}>{opt.letter})</span>
+                                        <span style={{ flex: 1 }}>{opt.text}</span>
+                                        {submitted && opt.letter === q.correctAnswer && <span>✓</span>}
+                                        {submitted && opt.letter === sel && opt.letter !== q.correctAnswer && <span>✗</span>}
+                                    </button>
+                                );
+                            })}
+                        </div>
+
+                        {!submitted ? (
+                            <Btn onClick={submit} disabled={!sel} style={{ width: "100%", marginTop: 8, justifyContent: "center" }}>
+                                Submit Answer
+                            </Btn>
+                        ) : (
+                            <div style={{
+                                marginTop: 20,
+                                padding: 22,
+                                borderRadius: 14,
+                                background: isCorrect ? "rgba(52,211,153,0.08)" : "rgba(248,113,113,0.08)",
+                                border: `1px solid ${isCorrect ? "#34d39966" : "#f8717166"}`,
+                            }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                                    <span style={{ fontSize: 28 }}>{isCorrect ? "✅" : "❌"}</span>
+                                    <span style={{ fontSize: 20, fontWeight: 800, color: isCorrect ? "#34d399" : "#f87171" }}>
+                                        {isCorrect ? "Correct!" : "Incorrect"}
+                                    </span>
+                                </div>
+                                <div style={{ display: "flex", gap: 14, marginBottom: 14, flexWrap: "wrap" }}>
+                                    <span style={{ color: T.txt2, fontSize: 13 }}><strong>Yours:</strong> {sel}</span>
+                                    <span style={{ color: T.txt2, fontSize: 13 }}><strong>Correct:</strong> {q.correctAnswer}</span>
+                                </div>
+                                <div style={{ background: T.surface, borderRadius: 10, padding: 18 }}>
+                                    <h4 style={{ color: T.cyan, fontWeight: 700, marginBottom: 8, fontSize: 14 }}>📖 Explanation</h4>
+                                    <p style={{ color: T.txt2, fontSize: 13, lineHeight: 1.8 }}>{q.explanation}</p>
+                                    <p style={{ color: T.muted, fontSize: 12, marginTop: 10 }}><strong>Ref:</strong> {q.reference}</p>
+                                </div>
+                                <Btn onClick={next} style={{ width: "100%", marginTop: 16, justifyContent: "center" }}>
+                                    {idx + 1 >= questions.length ? "View Results" : "Next Question →"}
+                                </Btn>
+                            </div>
+                        )}
+                    </Card>
+                </div>
+            );
+        }
+
+        // ─── Results Screen ──────────────────────────────────────────────────
+        function ResultsScreen({ score, total, answers, onRestart }) {
+            const pct = total > 0 ? Math.round((score / total) * 100) : 0;
+            const passed = score >= PASS_THRESHOLD;
+            const failed = answers.filter((a) => !a.correct);
+            const [fmt, setFmt] = useState("markdown");
+
+            const byDiff = { Easy: { t: 0, c: 0 }, Moderate: { t: 0, c: 0 }, Hard: { t: 0, c: 0 } };
+            answers.forEach((a) => { if (byDiff[a.difficulty]) { byDiff[a.difficulty].t++; if (a.correct) byDiff[a.difficulty].c++; } });
+
+            function exportFailed() {
+                const ts = new Date().toISOString().split("T")[0];
+                let content, ext;
+                if (fmt === "markdown") {
+                    ext = "md";
+                    content = `# EDIC Quiz — Failed Questions Review\n\n**Date:** ${new Date().toLocaleDateString()}\n**Failed:** ${failed.length}/${total}\n\n---\n\n`;
+                    failed.forEach((q, i) => {
+                        content += `## Q${i + 1}: ${q.topic}\n**Difficulty:** ${q.difficulty}\n\n### Scenario\n${q.vignette}\n\n### Question\n${q.questionText}\n\n### Options\n`;
+                        q.options.forEach((o) => (content += `${o.letter}) ${o.text}\n`));
+                        content += `\n**Your Answer:** ${q.userAnswer}\n**Correct:** ${q.correctAnswer}\n\n### Explanation\n${q.explanation}\n\n**Ref:** ${q.reference}\n\n---\n\n`;
+                    });
+                } else {
+                    ext = "json";
+                    content = JSON.stringify({ exportDate: new Date().toISOString(), totalFailed: failed.length, questions: failed }, null, 2);
+                }
+                const a = document.createElement("a");
+                a.href = URL.createObjectURL(new Blob([content], { type: ext === "md" ? "text/markdown" : "application/json" }));
+                a.download = `EDIC_Failed_${ts}.${ext}`;
+                a.click();
+            }
+
+            return (
+                <div className="animate-fadeUp">
+                    <Card style={{ padding: 44, textAlign: "center" }}>
+                        <div style={{ fontSize: 52, marginBottom: 10 }}>{passed ? "🏆" : "📚"}</div>
+                        <h1 style={{ color: T.txt, fontSize: 28, fontWeight: 800, marginBottom: 6 }}>{passed ? "Mastery Achieved!" : "Review Recommended"}</h1>
+                        <div style={{
+                            fontSize: 64,
+                            fontWeight: 900,
+                            background: `linear-gradient(135deg, ${T.teal}, ${T.cyan})`,
+                            WebkitBackgroundClip: "text",
+                            WebkitTextFillColor: "transparent",
+                            margin: "10px 0",
+                            lineHeight: 1,
+                        }}>{pct}%</div>
+                        <p style={{ color: T.txt2, fontSize: 17 }}>{score} out of {total} correct</p>
+                        <span style={{
+                            display: "inline-block",
+                            marginTop: 16,
+                            padding: "8px 28px",
+                            borderRadius: 99,
+                            fontWeight: 800,
+                            fontSize: 13,
+                            letterSpacing: 0.8,
+                            background: passed ? T.mint : T.gold,
+                            color: "#0a1628",
+                        }}>
+                            {passed ? "✓ PASS" : "⚠ REVIEW NEEDED"}
+                        </span>
+                    </Card>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 14, marginTop: 20 }}>
+                        {Object.entries(byDiff).map(([d, data]) => {
+                            if (data.t === 0) return null;
+                            const p = Math.round((data.c / data.t) * 100);
+                            const col = diffBadgeColor[d];
+                            return (
+                                <Card key={d} style={{ padding: 20 }}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+                                        <Badge difficulty={d} />
+                                        <span style={{ color: T.txt, fontWeight: 700 }}>{p}%</span>
+                                    </div>
+                                    <div style={{ height: 6, background: "rgba(255,255,255,0.06)", borderRadius: 99, overflow: "hidden" }}>
+                                        <div style={{ height: "100%", width: `${p}%`, background: col.dot, borderRadius: 99, transition: "width 1s" }} />
+                                    </div>
+                                    <p style={{ color: T.muted, fontSize: 12, marginTop: 6 }}>{data.c}/{data.t} correct</p>
+                                </Card>
+                            );
+                        })}
+                    </div>
+
+                    {failed.length > 0 && (
+                        <Card style={{ padding: 24, marginTop: 20, border: `1px solid ${T.gold}40` }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                                <span style={{ fontSize: 24 }}>⚠️</span>
+                                <div>
+                                    <h3 style={{ color: T.txt, fontWeight: 700, fontSize: 16 }}>Questions Requiring Review</h3>
+                                    <p style={{ color: T.muted, fontSize: 12 }}>{failed.length} incorrect</p>
+                                </div>
+                            </div>
+                            <div style={{ display: "flex", gap: 18, margin: "12px 0" }}>
+                                {["markdown", "json"].map((f) => (
+                                    <label key={f} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", color: T.txt2, fontSize: 13 }}>
+                                        <input type="radio" checked={fmt === f} onChange={() => setFmt(f)} style={{ accentColor: T.cyan }} />
+                                        {f === "markdown" ? "Markdown (.md)" : "JSON (.json)"}
+                                    </label>
+                                ))}
+                            </div>
+                            <button
+                                onClick={exportFailed}
+                                style={{
+                                    padding: "12px 24px",
+                                    borderRadius: 12,
+                                    border: "none",
+                                    fontWeight: 700,
+                                    fontSize: 14,
+                                    cursor: "pointer",
+                                    background: `linear-gradient(135deg, ${T.gold}, #f59e0b)`,
+                                    color: "#1a1a2e",
+                                    fontFamily: "inherit",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 8,
+                                }}
+                            >
+                                💾 Save Failed Questions
+                            </button>
+                        </Card>
+                    )}
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginTop: 20 }}>
+                        <Btn onClick={onRestart} style={{ width: "100%", justifyContent: "center" }}>🔄 Retake</Btn>
+                        <Btn onClick={onRestart} variant="secondary" style={{ width: "100%", justifyContent: "center" }}>📤 New Material</Btn>
+                    </div>
+                </div>
+            );
+        }
+
+        // ─── Main App ────────────────────────────────────────────────────────
+        function EDICQuizApp() {
+            const [screen, setScreen] = useState("upload");
+            const [files, setFiles] = useState([]);
+            const [questions, setQuestions] = useState([]);
+            const [loadProgress, setLoadProgress] = useState(0);
+            const [loadStatus, setLoadStatus] = useState("");
+            const [finalScore, setFinalScore] = useState(0);
+            const [finalAnswers, setFinalAnswers] = useState([]);
+            const [error, setError] = useState("");
+            const [apiKey, setApiKey] = useState("");
+
+            useEffect(() => {
+                const saved = localStorage.getItem("claude_api_key");
+                if (saved) setApiKey(saved);
+            }, []);
+
+            const handleFilesReady = (readyFiles) => {
+                setFiles(readyFiles);
+                setScreen(apiKey ? "difficulty" : "apikey");
+            };
+
+            const handleApiKeySet = (key) => {
+                setApiKey(key);
+                setScreen("difficulty");
+            };
+
+            const handleDifficultySelect = async (difficulty) => {
+                setScreen("loading");
+                setLoadProgress(0);
+                setError("");
+
+                const combinedText = files.map((f) => `\n=== SOURCE: ${f.name} ===\n${f.text}`).join("\n\n");
+                const fileNames = files.map((f) => f.name);
+
+                try {
+                    const allQuestions = [];
+                    const batches = 3;
+
+                    for (let i = 0; i < batches; i++) {
+                        setLoadStatus(`Generating batch ${i + 1} of ${batches}… (${allQuestions.length} questions so far)`);
+
+                        const textLength = combinedText.length;
+                        const sliceSize = Math.min(28000, textLength);
+                        const offset = Math.floor((textLength - sliceSize) * (i / Math.max(batches - 1, 1)));
+                        const textSlice = combinedText.slice(offset, offset + sliceSize);
+
+                        const prompt = buildPrompt(textSlice, difficulty, i + 1, batches, fileNames);
+                        let retries = 2;
+                        let parsed = null;
+
+                        while (retries >= 0 && !parsed) {
+                            try {
+                                const resp = await fetch("https://api.anthropic.com/v1/messages", {
+                                    method: "POST",
+                                    headers: {
+                                        "Content-Type": "application/json",
+                                        "x-api-key": apiKey,
+                                        "anthropic-version": "2023-06-01",
+                                    },
+                                    body: JSON.stringify({
+                                        model: "claude-3-sonnet-20240229",
+                                        max_tokens: 4096,
+                                        messages: [{ role: "user", content: prompt }],
+                                    }),
+                                });
+
+                                if (!resp.ok) {
+                                    const errData = await resp.json().catch(() => ({}));
+                                    throw new Error(errData.error?.message || `API error ${resp.status}`);
+                                }
+
+                                const data = await resp.json();
+                                const text = data.content?.map((c) => c.text || "").join("") || "";
+                                const jsonStr = text.replace(/```json\s*/g, "").replace(/```/g, "").trim();
+                                
+                                try {
+                                    parsed = JSON.parse(jsonStr);
+                                } catch {
+                                    const match = jsonStr.match(/\[[\s\S]*\]/);
+                                    if (match) parsed = JSON.parse(match[0]);
+                                }
+                            } catch (e) {
+                                retries--;
+                                if (retries < 0) throw e;
+                                setLoadStatus(`Batch ${i + 1} failed, retrying… (${e.message})`);
+                                await new Promise((r) => setTimeout(r, 2000));
+                            }
+                        }
+
+                        if (Array.isArray(parsed)) {
+                            parsed.forEach((q) => {
+                                if (q.difficulty && q.questionText && q.correctAnswer && Array.isArray(q.options) && q.options.length === 4 && q.vignette && q.explanation) {
+                                    allQuestions.push({
+                                        ...q,
+                                        topic: q.topic || "General",
+                                        reference: q.reference || "N/A",
+                                        id: allQuestions.length + 1,
+                                        number: allQuestions.length + 1,
+                                    });
+                                }
+                            });
+                        }
+                        setLoadProgress(allQuestions.length);
+                    }
+
+                    if (allQuestions.length < 10) {
+                        throw new Error(`Only ${allQuestions.length} valid questions generated. Try uploading more content.`);
+                    }
+
+                    const finalQ = shuffleArray(allQuestions).slice(0, TOTAL_QUESTIONS);
+                    finalQ.forEach((q, i) => { q.id = i + 1; q.number = i + 1; });
+
+                    setQuestions(finalQ);
+                    setScreen("quiz");
+                } catch (e) {
+                    setError(e.message || "Failed to generate quiz. Check your API key and try again.");
+                    setScreen("difficulty");
+                }
+            };
+
+            const reset = () => {
+                setScreen("upload");
+                setFiles([]);
+                setQuestions([]);
+                setFinalScore(0);
+                setFinalAnswers([]);
+                setError("");
+                setLoadProgress(0);
+            };
+
+            return (
+                <div style={{ minHeight: "100vh", color: T.txt }}>
+                    <div style={{ maxWidth: 860, margin: "0 auto", padding: "20px 16px 48px" }}>
+                        <div style={{ textAlign: "center", padding: "28px 16px 24px" }}>
+                            <h1 style={{
+                                fontSize: 32,
+                                fontWeight: 900,
+                                letterSpacing: -1,
+                                background: `linear-gradient(135deg, ${T.teal}, ${T.cyan}, ${T.mint})`,
+                                WebkitBackgroundClip: "text",
+                                WebkitTextFillColor: "transparent",
+                                lineHeight: 1.2,
+                            }}>
+                                EDIC Quiz Generator
+                            </h1>
+                            <p style={{ color: T.muted, fontSize: 14, marginTop: 6, fontWeight: 500 }}>
+                                AI-Powered MCQ Assessment • Multi-Source Support
+                            </p>
+                        </div>
+
+                        {error && (
+                            <div style={{
+                                background: "rgba(248,113,113,0.1)",
+                                border: "1px solid #f8717166",
+                                borderRadius: 12,
+                                padding: 14,
+                                marginBottom: 16,
+                                color: "#f87171",
+                                fontWeight: 600,
+                                textAlign: "center",
+                                fontSize: 14,
+                            }}>
+                                {error}
+                            </div>
+                        )}
+
+                        {screen === "upload" && <UploadScreen onFilesReady={handleFilesReady} />}
+                        {screen === "apikey" && <ApiKeyScreen onKeySet={handleApiKeySet} />}
+                        {screen === "difficulty" && <DifficultyScreen files={files} onSelect={handleDifficultySelect} />}
+                        {screen === "loading" && <LoadingScreen progress={loadProgress} status={loadStatus} />}
+                        {screen === "quiz" && <QuizScreen questions={questions} onComplete={(s, a) => { setFinalScore(s); setFinalAnswers(a); setScreen("results"); }} />}
+                        {screen === "results" && <ResultsScreen score={finalScore} total={questions.length} answers={finalAnswers} onRestart={reset} />}
+                    </div>
+                </div>
+            );
+        }
+
+        // Render
+        const root = ReactDOM.createRoot(document.getElementById("root"));
+        root.render(<EDICQuizApp />);
+    </script>
+</body>
+</html>
